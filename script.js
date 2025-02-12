@@ -300,58 +300,172 @@ class OMRScanner {
     }
 
     async processOMR() {
-        // This is where we'll implement the OMR processing logic
-        // For now, we'll just compare with the answer key
-        const answers = this.getAnswerKey();
-        const results = this.simulateOMRProcessing(answers);
-        this.displayResults(results);
+        const canvas = document.getElementById('canvas');
+        const ctx = canvas.getContext('2d');
+        const preview = document.getElementById('preview');
+        
+        // Convert to grayscale and apply threshold
+        let imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+        let data = imageData.data;
+        
+        // Convert to grayscale
+        for (let i = 0; i < data.length; i += 4) {
+            let avg = (data[i] + data[i + 1] + data[i + 2]) / 3;
+            data[i] = avg;     // red
+            data[i + 1] = avg; // green
+            data[i + 2] = avg; // blue
+        }
+        
+        // Apply threshold
+        for (let i = 0; i < data.length; i += 4) {
+            let v = data[i] < 128 ? 0 : 255;
+            data[i] = v;     // red
+            data[i + 1] = v; // green
+            data[i + 2] = v; // blue
+        }
+        
+        ctx.putImageData(imageData, 0, 0);
+        
+        // Detect pink borders
+        const borders = this.detectPinkBorders(canvas);
+        if (!borders) {
+            alert('Could not detect OMR sheet borders. Please ensure proper lighting and alignment.');
+            return;
+        }
+        
+        // Extract and analyze bubbles
+        const answers = this.analyzeBubbles(canvas, borders);
+        
+        // Display results
+        this.displayResults(answers);
     }
 
-    getAnswerKey() {
-        const answers = {};
-        for (let i = 1; i <= this.numQuestions; i++) {
-            answers[i] = document.getElementById(`q${i}`).value;
+    detectPinkBorders(canvas) {
+        const ctx = canvas.getContext('2d');
+        const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+        const data = imageData.data;
+        
+        // Pink color range in RGB
+        const pinkLowerR = 200, pinkUpperR = 255;
+        const pinkLowerG = 100, pinkUpperG = 180;
+        const pinkLowerB = 150, pinkUpperB = 220;
+        
+        let leftBorder = canvas.width;
+        let rightBorder = 0;
+        let topBorder = canvas.height;
+        let bottomBorder = 0;
+        
+        for (let y = 0; y < canvas.height; y++) {
+            for (let x = 0; x < canvas.width; x++) {
+                const i = (y * canvas.width + x) * 4;
+                const r = data[i];
+                const g = data[i + 1];
+                const b = data[i + 2];
+                
+                if (r >= pinkLowerR && r <= pinkUpperR &&
+                    g >= pinkLowerG && g <= pinkUpperG &&
+                    b >= pinkLowerB && b <= pinkUpperB) {
+                    
+                    leftBorder = Math.min(leftBorder, x);
+                    rightBorder = Math.max(rightBorder, x);
+                    topBorder = Math.min(topBorder, y);
+                    bottomBorder = Math.max(bottomBorder, y);
+                }
+            }
         }
+        
+        if (leftBorder >= rightBorder || topBorder >= bottomBorder) {
+            return null;
+        }
+        
+        return {
+            left: leftBorder,
+            right: rightBorder,
+            top: topBorder,
+            bottom: bottomBorder
+        };
+    }
+
+    analyzeBubbles(canvas, borders) {
+        const ctx = canvas.getContext('2d');
+        const answers = new Array(100).fill(null);
+        
+        // Calculate grid dimensions
+        const gridWidth = borders.right - borders.left;
+        const gridHeight = borders.bottom - borders.top;
+        
+        // Define bubble dimensions
+        const bubbleWidth = gridWidth / 4;  // 4 options (A,B,C,D)
+        const bubbleHeight = gridHeight / 25; // 25 questions per column
+        
+        // Analyze each bubble
+        for (let col = 0; col < 4; col++) {
+            for (let row = 0; row < 25; row++) {
+                for (let option = 0; option < 4; option++) {
+                    const x = borders.left + (col * gridWidth/4) + (option * bubbleWidth) + (bubbleWidth * 0.25);
+                    const y = borders.top + (row * bubbleHeight) + (bubbleHeight * 0.25);
+                    const w = bubbleWidth * 0.5;
+                    const h = bubbleHeight * 0.5;
+                    
+                    const filled = this.isBubbleFilled(ctx, x, y, w, h);
+                    if (filled) {
+                        const questionNum = row + (col * 25);
+                        answers[questionNum] = ['A', 'B', 'C', 'D'][option];
+                    }
+                }
+            }
+        }
+        
         return answers;
     }
 
-    simulateOMRProcessing(answerKey) {
-        // This is a dummy implementation
-        // In reality, we would process the image using OpenCV.js
-        const results = {
-            score: 0,
-            total: this.numQuestions,
-            answers: {}
-        };
-
-        for (let i = 1; i <= this.numQuestions; i++) {
-            // Simulate detected answers (random for demonstration)
-            const detected = this.availableOptions[Math.floor(Math.random() * this.optionsPerQuestion)];
-            results.answers[i] = {
-                expected: answerKey[i],
-                marked: detected,
-                correct: detected === answerKey[i]
-            };
-            if (detected === answerKey[i]) {
-                results.score++;
+    isBubbleFilled(ctx, x, y, width, height) {
+        const imageData = ctx.getImageData(x, y, width, height);
+        const data = imageData.data;
+        let darkPixels = 0;
+        let totalPixels = width * height;
+        
+        for (let i = 0; i < data.length; i += 4) {
+            if (data[i] < 128) { // If pixel is dark
+                darkPixels++;
             }
         }
-
-        return results;
+        
+        return (darkPixels / totalPixels) > 0.5; // More than 50% dark pixels
     }
 
-    displayResults(results) {
-        this.resultsDiv.innerHTML = `
-            <h3>Score: ${results.score}/${results.total}</h3>
-            <div class="answers-review">
-                ${Object.entries(results.answers).map(([q, data]) => `
-                    <div class="answer-review ${data.correct ? 'correct' : 'incorrect'}">
-                        Q${q}: Marked ${data.marked}, Correct ${data.expected}
-                    </div>
-                `).join('')}
-            </div>
-        `;
-        this.emailBtn.style.display = 'block';
+    displayResults(answers) {
+        const resultsDiv = document.getElementById('results');
+        resultsDiv.innerHTML = '<h3>Scanned Answers:</h3>';
+        
+        const table = document.createElement('table');
+        table.className = 'results-table';
+        
+        // Create header row
+        const headerRow = document.createElement('tr');
+        ['Q.No', 'Answer', 'Q.No', 'Answer', 'Q.No', 'Answer', 'Q.No', 'Answer'].forEach(text => {
+            const th = document.createElement('th');
+            th.textContent = text;
+            headerRow.appendChild(th);
+        });
+        table.appendChild(headerRow);
+        
+        // Create rows with 4 questions per row
+        for (let i = 0; i < 25; i++) {
+            const row = document.createElement('tr');
+            for (let j = 0; j < 4; j++) {
+                const qNum = i + (j * 25);
+                const qNumCell = document.createElement('td');
+                qNumCell.textContent = qNum + 1;
+                const ansCell = document.createElement('td');
+                ansCell.textContent = answers[qNum] || '-';
+                row.appendChild(qNumCell);
+                row.appendChild(ansCell);
+            }
+            table.appendChild(row);
+        }
+        
+        resultsDiv.appendChild(table);
     }
 
     emailResults() {
