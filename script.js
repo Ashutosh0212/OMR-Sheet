@@ -302,7 +302,16 @@ class OMRScanner {
     async processOMR() {
         const canvas = document.getElementById('canvas');
         const ctx = canvas.getContext('2d');
-        const preview = document.getElementById('preview');
+        
+        // Get the answer key from the form
+        const answerKey = {};
+        for (let i = 1; i <= this.numQuestions; i++) {
+            const container = document.getElementById(`options-container-${i}`);
+            const selectedOption = container.querySelector('input:checked');
+            if (selectedOption) {
+                answerKey[i] = selectedOption.value;
+            }
+        }
         
         // Convert to grayscale and apply threshold
         let imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
@@ -334,10 +343,34 @@ class OMRScanner {
         }
         
         // Extract and analyze bubbles
-        const answers = this.analyzeBubbles(canvas, borders);
+        const scannedAnswers = this.analyzeBubbles(canvas, borders);
+        
+        // Compare answers and calculate score
+        const results = {
+            score: 0,
+            total: this.numQuestions,
+            details: []
+        };
+
+        for (let i = 0; i < this.numQuestions; i++) {
+            const questionNum = i + 1;
+            const scanned = scannedAnswers[i];
+            const correct = answerKey[questionNum];
+            
+            results.details.push({
+                question: questionNum,
+                correct: correct || '-',
+                given: scanned || '-',
+                isCorrect: correct && scanned && correct === scanned
+            });
+
+            if (correct && scanned && correct === scanned) {
+                results.score++;
+            }
+        }
         
         // Display results
-        this.displayResults(answers);
+        this.displayResults(results);
     }
 
     detectPinkBorders(canvas) {
@@ -434,38 +467,64 @@ class OMRScanner {
         return (darkPixels / totalPixels) > 0.5; // More than 50% dark pixels
     }
 
-    displayResults(answers) {
+    displayResults(results) {
         const resultsDiv = document.getElementById('results');
-        resultsDiv.innerHTML = '<h3>Scanned Answers:</h3>';
+        resultsDiv.innerHTML = `
+            <div class="results-header">
+                <h3>OMR Results</h3>
+                <div class="score-summary">
+                    <h4>Score: ${results.score}/${results.total}</h4>
+                    <p>Percentage: ${((results.score / results.total) * 100).toFixed(2)}%</p>
+                </div>
+            </div>
+        `;
         
         const table = document.createElement('table');
         table.className = 'results-table';
         
         // Create header row
         const headerRow = document.createElement('tr');
-        ['Q.No', 'Answer', 'Q.No', 'Answer', 'Q.No', 'Answer', 'Q.No', 'Answer'].forEach(text => {
+        ['Q.No', 'Correct Answer', 'Given Answer', 'Status'].forEach(text => {
             const th = document.createElement('th');
             th.textContent = text;
             headerRow.appendChild(th);
         });
         table.appendChild(headerRow);
         
-        // Create rows with 4 questions per row
-        for (let i = 0; i < 25; i++) {
+        // Add results rows
+        results.details.forEach(detail => {
             const row = document.createElement('tr');
-            for (let j = 0; j < 4; j++) {
-                const qNum = i + (j * 25);
-                const qNumCell = document.createElement('td');
-                qNumCell.textContent = qNum + 1;
-                const ansCell = document.createElement('td');
-                ansCell.textContent = answers[qNum] || '-';
-                row.appendChild(qNumCell);
-                row.appendChild(ansCell);
-            }
+            row.className = detail.isCorrect ? 'correct-answer' : 'wrong-answer';
+            
+            // Question number
+            const qNumCell = document.createElement('td');
+            qNumCell.textContent = detail.question;
+            
+            // Correct answer
+            const correctCell = document.createElement('td');
+            correctCell.textContent = detail.correct;
+            
+            // Given answer
+            const givenCell = document.createElement('td');
+            givenCell.textContent = detail.given;
+            
+            // Status
+            const statusCell = document.createElement('td');
+            statusCell.textContent = detail.isCorrect ? '✓' : '✗';
+            statusCell.className = detail.isCorrect ? 'status-correct' : 'status-wrong';
+            
+            row.appendChild(qNumCell);
+            row.appendChild(correctCell);
+            row.appendChild(givenCell);
+            row.appendChild(statusCell);
+            
             table.appendChild(row);
-        }
+        });
         
         resultsDiv.appendChild(table);
+        
+        // Show email button
+        this.emailBtn.style.display = 'block';
     }
 
     emailResults() {
