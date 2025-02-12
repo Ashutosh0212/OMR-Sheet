@@ -9,7 +9,7 @@ class OMRScanner {
         this.answerForm = document.getElementById('answer-form');
         this.resultsDiv = document.getElementById('results');
         
-        // Add new properties
+        // Configuration
         this.numQuestions = 100;
         this.optionsPerQuestion = 4;
         this.availableOptions = ['A', 'B', 'C', 'D'];
@@ -24,6 +24,16 @@ class OMRScanner {
         this.initializeConfigHandlers();
         this.createAnswerForm();
         this.addEventListeners();
+
+        // Debug options
+        this.debug = true;
+        this.debugCanvas = document.createElement('canvas');
+        this.debugCanvas.className = 'debug-overlay';
+        document.querySelector('.preview-container').appendChild(this.debugCanvas);
+
+        // Initialize ML model
+        this.model = null;
+        this.loadModel();
     }
 
     displaySecureContextError() {
@@ -300,58 +310,59 @@ class OMRScanner {
     }
 
     async processOMR() {
-        const canvas = document.getElementById('canvas');
+        if (!this.canvas) {
+            throw new Error('Canvas element not found');
+        }
+
+        const canvas = this.canvas;
         const ctx = canvas.getContext('2d');
         
-        // Get the answer key from the form
-        const answerKey = {};
-        for (let i = 1; i <= this.numQuestions; i++) {
-            const container = document.getElementById(`options-container-${i}`);
-            const selectedOption = container.querySelector('input:checked');
-            if (selectedOption) {
-                answerKey[i] = selectedOption.value;
-            }
+        if (!ctx) {
+            throw new Error('Could not get canvas context');
         }
 
-        // Apply preprocessing to enhance pen marks
-        const pinkPixels = this.enhanceImage(canvas);
-        
-        // Find the grid boundaries using edge detection
-        const boundaries = this.findGridBoundaries(canvas);
-        if (!boundaries) {
-            alert('Could not detect OMR grid. Please ensure proper lighting and alignment.');
-            return;
+        // Validate image data
+        const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+        if (!imageData || !imageData.data || imageData.data.length === 0) {
+            throw new Error('No valid image data found');
         }
         
-        // Extract and analyze bubbles
-        const scannedAnswers = this.analyzeBubblesNew(canvas, boundaries);
+        // Set up debug canvas
+        this.debugCanvas.width = canvas.width;
+        this.debugCanvas.height = canvas.height;
+        const debugCtx = this.debugCanvas.getContext('2d');
+        debugCtx.clearRect(0, 0, this.debugCanvas.width, this.debugCanvas.height);
         
-        // Compare answers and calculate score
-        const results = {
-            score: 0,
-            total: this.numQuestions,
-            details: []
-        };
-
-        for (let i = 0; i < this.numQuestions; i++) {
-            const questionNum = i + 1;
-            const scanned = scannedAnswers[i];
-            const correct = answerKey[questionNum];
-            
-            results.details.push({
-                question: questionNum,
-                correct: correct || '-',
-                given: scanned || '-',
-                isCorrect: correct && scanned && correct === scanned
-            });
-
-            if (correct && scanned && correct === scanned) {
-                results.score++;
-            }
+        console.log('Starting OMR processing...');
+        
+        // Enhanced image processing
+        const processedImageData = this.enhanceImage(canvas);
+        
+        // Find bubbles using contour detection
+        const bubbles = this.detectBubbles(processedImageData);
+        
+        if (!bubbles || bubbles.length === 0) {
+            throw new Error('No bubbles detected in the image');
+        }
+        
+        // Analyze bubbles
+        const answers = this.analyzeBubbles(bubbles);
+        
+        if (!answers || answers.length === 0) {
+            throw new Error('No answers could be determined');
         }
         
         // Display results
-        this.displayResults(results);
+        this.displayResults({
+            score: 0,
+            total: this.numQuestions,
+            details: answers.map((ans, i) => ({
+                question: i + 1,
+                given: ans || '-',
+                correct: '-',
+                isCorrect: false
+            }))
+        });
     }
 
     enhanceImage(canvas) {
@@ -359,166 +370,182 @@ class OMRScanner {
         const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
         const data = imageData.data;
         
-        // First pass: Detect pink grid lines
-        const pinkPixels = [];
+        // Convert to grayscale and enhance contrast
         for (let i = 0; i < data.length; i += 4) {
             const r = data[i];
             const g = data[i + 1];
             const b = data[i + 2];
             
-            // Detect pink grid lines (will be used for alignment)
-            const isPink = (r > 200 && g < 150 && b > 150);
-            if (isPink) {
-                pinkPixels.push(Math.floor(i / 4));
-            }
+            // Convert to grayscale using luminance formula
+            let gray = 0.299 * r + 0.587 * g + 0.114 * b;
             
-            // Check for filled bubbles (dark blue or black)
-            const isDark = (r < 100 && g < 100 && b < 100) || // Black
-                          (r < 100 && g < 100 && b > 150);    // Dark blue
+            // Apply adaptive thresholding
+            const x = (i/4) % canvas.width;
+            const y = Math.floor((i/4) / canvas.width);
+            const threshold = this.calculateAdaptiveThreshold(data, canvas.width, x, y);
             
-            if (isDark) {
-                data[i] = 0;     // R
-                data[i + 1] = 0; // G
-                data[i + 2] = 0; // B
-            } else if (!isPink) {
-                // Make non-marks white for better contrast
-                data[i] = 255;
-                data[i + 1] = 255;
-                data[i + 2] = 255;
-            }
+            // Apply the threshold
+            const value = gray < threshold ? 0 : 255;
+            
+            data[i] = value;
+            data[i + 1] = value;
+            data[i + 2] = value;
         }
         
         ctx.putImageData(imageData, 0, 0);
-        return pinkPixels;
+        
+        if (this.debug) {
+            this.debugCanvas.getContext('2d').putImageData(imageData, 0, 0);
+        }
+        
+        return imageData;
     }
 
-    findGridBoundaries(canvas) {
-        const ctx = canvas.getContext('2d');
-        const width = canvas.width;
-        const height = canvas.height;
+    calculateAdaptiveThreshold(data, width, x, y, windowSize = 15) {
+        let sum = 0;
+        let count = 0;
         
-        // Find pink grid lines first
-        const pinkPixels = this.enhanceImage(canvas);
-        
-        // Calculate pink pixel density in regions
-        let leftMost = width;
-        let rightMost = 0;
-        let topMost = height;
-        let bottomMost = 0;
-        
-        pinkPixels.forEach(pixel => {
-            const x = pixel % width;
-            const y = Math.floor(pixel / width);
-            
-            leftMost = Math.min(leftMost, x);
-            rightMost = Math.max(rightMost, x);
-            topMost = Math.min(topMost, y);
-            bottomMost = Math.max(bottomMost, y);
-        });
-        
-        // Add margins to boundaries
-        return {
-            left: leftMost + 5,
-            right: rightMost - 5,
-            top: topMost + 5,
-            bottom: bottomMost - 5
-        };
-    }
-
-    analyzeBubblesNew(canvas, boundaries) {
-        const ctx = canvas.getContext('2d');
-        const answers = new Array(100).fill(null);
-        
-        // Calculate grid dimensions based on the OMR format in the image
-        const gridWidth = boundaries.right - boundaries.left;
-        const gridHeight = boundaries.bottom - boundaries.top;
-        
-        // The OMR has 4 sections of 25 questions each
-        const SECTIONS = 4;
-        const QUESTIONS_PER_SECTION = 25;
-        const OPTIONS = 4; // A, B, C, D
-        
-        // Calculate dimensions for each section
-        const sectionHeight = gridHeight / SECTIONS;
-        const questionHeight = sectionHeight / QUESTIONS_PER_SECTION;
-        
-        // Process each section
-        for (let section = 0; section < SECTIONS; section++) {
-            const sectionY = boundaries.top + (section * sectionHeight);
-            
-            // Process each question in the section
-            for (let q = 0; q < QUESTIONS_PER_SECTION; q++) {
-                const questionY = sectionY + (q * questionHeight);
-                let maxDarkness = 0;
-                let selectedOption = null;
+        for (let dy = -windowSize; dy <= windowSize; dy++) {
+            for (let dx = -windowSize; dx <= windowSize; dx++) {
+                const nx = x + dx;
+                const ny = y + dy;
                 
-                // Check each option (A, B, C, D)
-                for (let opt = 0; opt < OPTIONS; opt++) {
-                    // Calculate bubble position
-                    // Adjust these values based on the exact layout in your image
-                    const bubbleX = boundaries.left + (opt * (gridWidth / 5.5));
-                    const bubbleY = questionY + (questionHeight * 0.2);
-                    const bubbleWidth = gridWidth / 20;  // Adjust based on actual bubble size
-                    const bubbleHeight = questionHeight * 0.6;
-                    
-                    const darkness = this.calculateBubbleDarkness(ctx, bubbleX, bubbleY, bubbleWidth, bubbleHeight);
-                    
-                    // Debug visualization
-                    ctx.strokeStyle = 'rgba(255, 0, 0, 0.5)';
-                    ctx.strokeRect(bubbleX, bubbleY, bubbleWidth, bubbleHeight);
-                    
-                    if (darkness > maxDarkness && darkness > 0.2) { // Adjusted threshold
-                        maxDarkness = darkness;
-                        selectedOption = opt;
-                    }
-                }
-                
-                if (selectedOption !== null) {
-                    const questionNum = q + (section * QUESTIONS_PER_SECTION);
-                    answers[questionNum] = ['A', 'B', 'C', 'D'][selectedOption];
+                if (nx >= 0 && nx < width && ny >= 0 && ny < data.length/(4*width)) {
+                    const i = (ny * width + nx) * 4;
+                    sum += data[i];
+                    count++;
                 }
             }
         }
+        
+        return (sum / count) * 0.95; // 95% of local average as threshold
+    }
+
+    detectBubbles(imageData) {
+        const bubbles = [];
+        const data = imageData.data;
+        const width = imageData.width;
+        const height = imageData.height;
+        
+        // Define the expected grid structure
+        const ROWS = 25;
+        const COLS = 4;
+        const OPTIONS = 4;
+        
+        // Calculate cell dimensions
+        const cellWidth = width / COLS;
+        const cellHeight = height / ROWS;
+        const optionWidth = cellWidth / OPTIONS;
+        
+        // Scan each cell for bubbles
+        for (let row = 0; row < ROWS; row++) {
+            for (let col = 0; col < COLS; col++) {
+                const bubbleGroup = [];
+                
+                for (let opt = 0; opt < OPTIONS; opt++) {
+                    const x = Math.floor(col * cellWidth + opt * optionWidth + optionWidth * 0.25);
+                    const y = Math.floor(row * cellHeight + cellHeight * 0.25);
+                    const w = Math.floor(optionWidth * 0.5);
+                    const h = Math.floor(cellHeight * 0.5);
+                    
+                    const darkness = this.calculateRegionDarkness(
+                        data, width, x, y, w, h
+                    );
+                    
+                    bubbleGroup.push({
+                        row,
+                        col,
+                        option: opt,
+                        darkness,
+                        x, y, w, h
+                    });
+                    
+                    if (this.debug) {
+                        const ctx = this.debugCanvas.getContext('2d');
+                        ctx.strokeStyle = `rgba(255, 0, 0, ${darkness})`;
+                        ctx.strokeRect(x, y, w, h);
+                    }
+                }
+                
+                // Only add the darkest bubble if it meets the threshold
+                const darkest = bubbleGroup.reduce((prev, curr) => 
+                    curr.darkness > prev.darkness ? curr : prev
+                );
+                
+                if (darkest.darkness > 0.3) { // Minimum darkness threshold
+                    bubbles.push(darkest);
+                }
+            }
+        }
+        
+        return bubbles;
+    }
+
+    calculateRegionDarkness(data, width, x, y, w, h) {
+        let darkPixels = 0;
+        let totalPixels = 0;
+        
+        for (let dy = 0; dy < h; dy++) {
+            for (let dx = 0; dx < w; dx++) {
+                const px = x + dx;
+                const py = y + dy;
+                
+                if (px >= 0 && px < width && py >= 0 && py < data.length/(4*width)) {
+                    const i = (py * width + px) * 4;
+                    if (data[i] < 128) { // Dark pixel
+                        darkPixels++;
+                    }
+                    totalPixels++;
+                }
+            }
+        }
+        
+        return darkPixels / totalPixels;
+    }
+
+    analyzeBubbles(bubbles) {
+        const answers = new Array(this.numQuestions).fill(null);
+        
+        // Group bubbles by question (row and column)
+        const questionGroups = new Map();
+        
+        bubbles.forEach(bubble => {
+            const questionIndex = bubble.row + bubble.col * 25;
+            if (!questionGroups.has(questionIndex)) {
+                questionGroups.set(questionIndex, []);
+            }
+            questionGroups.get(questionIndex).push(bubble);
+        });
+        
+        // Find darkest bubble in each group
+        questionGroups.forEach((group, questionIndex) => {
+            if (group.length > 0) {
+                const darkest = group.reduce((prev, curr) => 
+                    curr.darkness > prev.darkness ? curr : prev
+                );
+                
+                // Only mark as answered if darkness meets minimum threshold
+                if (darkest.darkness > 0.3) {
+                    answers[questionIndex] = this.availableOptions[darkest.option];
+                }
+            }
+        });
         
         return answers;
     }
 
-    calculateBubbleDarkness(ctx, x, y, width, height) {
-        try {
-            const imageData = ctx.getImageData(Math.floor(x), Math.floor(y), 
-                                             Math.ceil(width), Math.ceil(height));
-            const data = imageData.data;
-            let darkPixels = 0;
-            let totalPixels = 0;
-            
-            for (let i = 0; i < data.length; i += 4) {
-                const r = data[i];
-                const g = data[i + 1];
-                const b = data[i + 2];
-                
-                // Count dark pixels (black or dark blue)
-                if ((r < 100 && g < 100 && b < 100) ||    // Black
-                    (r < 100 && g < 100 && b > 150)) {    // Dark blue
-                    darkPixels++;
-                }
-                totalPixels++;
-            }
-            
-            return darkPixels / totalPixels;
-        } catch (e) {
-            console.error('Error calculating bubble darkness:', e);
-            return 0;
-        }
-    }
-
     displayResults(results) {
-        const resultsDiv = document.getElementById('results');
-        resultsDiv.innerHTML = `
+        if (!this.resultsDiv) {
+            console.error('Results div not found');
+            return;
+        }
+
+        this.resultsDiv.innerHTML = `
             <div class="results-header">
                 <h3>OMR Results</h3>
                 <div class="score-summary">
-                    <h4>Score: ${results.score}/${results.total}</h4>
-                    <p>Percentage: ${((results.score / results.total) * 100).toFixed(2)}%</p>
+                    <p>Total Questions: ${results.total}</p>
+                    <p>Answered Questions: ${results.details.filter(d => d.given !== '-').length}</p>
                 </div>
             </div>
         `;
@@ -528,7 +555,7 @@ class OMRScanner {
         
         // Create header row
         const headerRow = document.createElement('tr');
-        ['Q.No', 'Correct Answer', 'Given Answer', 'Status'].forEach(text => {
+        ['Q.No', 'Given Answer'].forEach(text => {
             const th = document.createElement('th');
             th.textContent = text;
             headerRow.appendChild(th);
@@ -538,46 +565,47 @@ class OMRScanner {
         // Add results rows
         results.details.forEach(detail => {
             const row = document.createElement('tr');
-            row.className = detail.isCorrect ? 'correct-answer' : 'wrong-answer';
             
             // Question number
             const qNumCell = document.createElement('td');
             qNumCell.textContent = detail.question;
             
-            // Correct answer
-            const correctCell = document.createElement('td');
-            correctCell.textContent = detail.correct;
-            
             // Given answer
             const givenCell = document.createElement('td');
             givenCell.textContent = detail.given;
-            
-            // Status
-            const statusCell = document.createElement('td');
-            statusCell.textContent = detail.isCorrect ? '✓' : '✗';
-            statusCell.className = detail.isCorrect ? 'status-correct' : 'status-wrong';
+            givenCell.className = detail.given === '-' ? 'unanswered' : 'answered';
             
             row.appendChild(qNumCell);
-            row.appendChild(correctCell);
             row.appendChild(givenCell);
-            row.appendChild(statusCell);
             
             table.appendChild(row);
         });
         
-        resultsDiv.appendChild(table);
-        
-        // Show email button
-        this.emailBtn.style.display = 'block';
+        this.resultsDiv.appendChild(table);
     }
 
     emailResults() {
         // Implement email functionality here
         alert('Results will be emailed (not implemented in this demo)');
     }
+
+    async loadModel() {
+        try {
+            // Load pre-trained MobileNet model
+            this.model = await tf.loadLayersModel('https://storage.googleapis.com/tfjs-models/tfjs/mobilenet_v1_0.25_224/model.json');
+            console.log('ML model loaded successfully');
+        } catch (error) {
+            console.error('Error loading ML model:', error);
+        }
+    }
 }
 
 // Initialize the application when the page loads
 document.addEventListener('DOMContentLoaded', () => {
-    new OMRScanner();
+    const scanner = new OMRScanner();
+    const statusDiv = document.getElementById('model-status');
+    if (statusDiv) {
+        statusDiv.textContent = 'Scanner ready';
+        statusDiv.style.color = '#28a745';
+    }
 }); 

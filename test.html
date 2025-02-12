@@ -1,0 +1,101 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>OMR Scanner Test</title>
+    <link rel="stylesheet" href="styles.css">
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/opencv.js/4.7.0/opencv.js"></script>
+</head>
+<body>
+    <div class="container">
+        <h1>OMR Scanner Test</h1>
+        
+        <div class="test-section">
+            <h2>Test Image</h2>
+            <input type="file" id="imageInput" accept="image/*">
+            <div class="preview-container">
+                <img id="preview" style="display: none; max-width: 100%;">
+                <canvas id="canvas" style="display: none;"></canvas>
+            </div>
+            <button id="process" disabled>Process OMR</button>
+            <div id="model-status">Please upload an image</div>
+        </div>
+
+        <div id="results"></div>
+    </div>
+
+    <script>
+        let isImageLoaded = false;
+
+        document.getElementById('imageInput').addEventListener('change', function(e) {
+            const file = e.target.files[0];
+            const processBtn = document.getElementById('process');
+            const statusDiv = document.getElementById('model-status');
+            
+            if (!file) {
+                processBtn.disabled = true;
+                statusDiv.textContent = 'Please upload an image';
+                statusDiv.style.color = '#dc3545';
+                return;
+            }
+
+            if (!file.type.startsWith('image/')) {
+                processBtn.disabled = true;
+                statusDiv.textContent = 'Please upload a valid image file';
+                statusDiv.style.color = '#dc3545';
+                return;
+            }
+
+            const reader = new FileReader();
+            reader.onload = function(event) {
+                const img = new Image();
+                img.onload = function() {
+                    const preview = document.getElementById('preview');
+                    preview.src = event.target.result;
+                    preview.style.display = 'block';
+                    
+                    // Set up canvas
+                    const canvas = document.getElementById('canvas');
+                    canvas.width = img.width;
+                    canvas.height = img.height;
+                    const ctx = canvas.getContext('2d');
+                    ctx.drawImage(img, 0, 0);
+                    
+                    isImageLoaded = true;
+                    processBtn.disabled = false;
+                    statusDiv.textContent = 'Image loaded - Ready to process';
+                    statusDiv.style.color = '#28a745';
+                };
+                img.onerror = function() {
+                    processBtn.disabled = true;
+                    statusDiv.textContent = 'Error loading image';
+                    statusDiv.style.color = '#dc3545';
+                };
+                img.src = event.target.result;
+            };
+            reader.readAsDataURL(file);
+        });
+
+        document.getElementById('process').addEventListener('click', async function() {
+            if (!isImageLoaded) {
+                alert('Please upload an image first');
+                return;
+            }
+
+            const statusDiv = document.getElementById('model-status');
+            statusDiv.textContent = 'Processing...';
+            
+            try {
+                const scanner = new OMRScanner();
+                await scanner.processOMR();
+                statusDiv.textContent = 'Processing complete!';
+                statusDiv.style.color = '#28a745';
+            } catch (error) {
+                console.error('Processing error:', error);
+                statusDiv.textContent = 'Error processing image: ' + error.message;
+                statusDiv.style.color = '#dc3545';
+            }
+        });
+    </script>
+    <script src="script.js"></script>
+</body>
+</html> 
