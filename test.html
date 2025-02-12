@@ -3,7 +3,12 @@
 <head>
     <title>OMR Scanner Test</title>
     <link rel="stylesheet" href="styles.css">
-    <script src="https://cdnjs.cloudflare.com/ajax/libs/opencv.js/4.7.0/opencv.js"></script>
+    <!-- TensorFlow.js -->
+    <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.11.0"></script>
+    <!-- OpenCV.js -->
+    <script src="https://docs.opencv.org/4.8.0/opencv.js"></script>
+    <!-- Image segmentation model -->
+    <script src="https://cdn.jsdelivr.net/npm/@tensorflow-models/deeplab"></script>
 </head>
 <body>
     <div class="container">
@@ -15,9 +20,10 @@
             <div class="preview-container">
                 <img id="preview" style="display: none; max-width: 100%;">
                 <canvas id="canvas" style="display: none;"></canvas>
+                <canvas id="debugCanvas" class="debug-overlay"></canvas>
             </div>
             <button id="process" disabled>Process OMR</button>
-            <div id="model-status">Please upload an image</div>
+            <div id="model-status">Loading models...</div>
         </div>
 
         <div id="results"></div>
@@ -25,6 +31,38 @@
 
     <script>
         let isImageLoaded = false;
+        let modelsLoaded = false;
+
+        // Wait for OpenCV and TensorFlow to load
+        async function waitForModels() {
+            const statusDiv = document.getElementById('model-status');
+            try {
+                // Wait for OpenCV
+                if (typeof cv === 'undefined') {
+                    statusDiv.textContent = 'Loading OpenCV...';
+                    await new Promise(resolve => {
+                        const checkCV = setInterval(() => {
+                            if (typeof cv !== 'undefined') {
+                                clearInterval(checkCV);
+                                resolve();
+                            }
+                        }, 100);
+                    });
+                }
+
+                // Initialize TensorFlow backend
+                statusDiv.textContent = 'Initializing TensorFlow...';
+                await tf.ready();
+                
+                modelsLoaded = true;
+                statusDiv.textContent = 'Models loaded - Ready to process';
+                statusDiv.style.color = '#28a745';
+            } catch (error) {
+                console.error('Error loading models:', error);
+                statusDiv.textContent = 'Error loading models';
+                statusDiv.style.color = '#dc3545';
+            }
+        }
 
         document.getElementById('imageInput').addEventListener('change', function(e) {
             const file = e.target.files[0];
@@ -61,9 +99,11 @@
                     ctx.drawImage(img, 0, 0);
                     
                     isImageLoaded = true;
-                    processBtn.disabled = false;
-                    statusDiv.textContent = 'Image loaded - Ready to process';
-                    statusDiv.style.color = '#28a745';
+                    processBtn.disabled = !modelsLoaded;
+                    if (modelsLoaded) {
+                        statusDiv.textContent = 'Image loaded - Ready to process';
+                        statusDiv.style.color = '#28a745';
+                    }
                 };
                 img.onerror = function() {
                     processBtn.disabled = true;
@@ -76,8 +116,8 @@
         });
 
         document.getElementById('process').addEventListener('click', async function() {
-            if (!isImageLoaded) {
-                alert('Please upload an image first');
+            if (!isImageLoaded || !modelsLoaded) {
+                alert('Please wait for models to load and upload an image');
                 return;
             }
 
@@ -95,6 +135,9 @@
                 statusDiv.style.color = '#dc3545';
             }
         });
+
+        // Start loading models
+        waitForModels();
     </script>
     <script src="script.js"></script>
 </body>
