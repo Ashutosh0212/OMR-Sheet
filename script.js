@@ -312,22 +312,9 @@ class OMRScanner {
                 answerKey[i] = selectedOption.value;
             }
         }
-        
-        // Convert to grayscale and enhance contrast
-        let imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
-        let data = imageData.data;
-        
-        // Convert to grayscale with enhanced contrast
-        for (let i = 0; i < data.length; i += 4) {
-            let avg = (data[i] * 0.299 + data[i + 1] * 0.587 + data[i + 2] * 0.114);
-            // Enhance contrast
-            avg = avg < 128 ? avg * 0.8 : Math.min(255, avg * 1.2);
-            data[i] = avg;     // red
-            data[i + 1] = avg; // green
-            data[i + 2] = avg; // blue
-        }
-        
-        ctx.putImageData(imageData, 0, 0);
+
+        // Apply preprocessing to enhance pen marks
+        this.enhanceImage(canvas);
         
         // Find the grid boundaries using edge detection
         const boundaries = this.findGridBoundaries(canvas);
@@ -365,6 +352,40 @@ class OMRScanner {
         
         // Display results
         this.displayResults(results);
+    }
+
+    enhanceImage(canvas) {
+        const ctx = canvas.getContext('2d');
+        const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+        const data = imageData.data;
+        
+        // First pass: Detect blue and black pen marks
+        for (let i = 0; i < data.length; i += 4) {
+            const r = data[i];
+            const g = data[i + 1];
+            const b = data[i + 2];
+            
+            // Check for blue pen (high blue, lower red and green)
+            const isBlue = (b > 150 && r < 150 && g < 150) || 
+                          (b - r > 50 && b - g > 50);
+            
+            // Check for black pen (all channels low)
+            const isBlack = (r < 100 && g < 100 && b < 100);
+            
+            // Convert detected marks to pure black
+            if (isBlue || isBlack) {
+                data[i] = 0;     // R
+                data[i + 1] = 0; // G
+                data[i + 2] = 0; // B
+            } else {
+                // Make non-marks white for better contrast
+                data[i] = 255;
+                data[i + 1] = 255;
+                data[i + 2] = 255;
+            }
+        }
+        
+        ctx.putImageData(imageData, 0, 0);
     }
 
     findGridBoundaries(canvas) {
@@ -466,14 +487,16 @@ class OMRScanner {
                 
                 // Check each option (A,B,C,D)
                 for (let opt = 0; opt < OPTIONS; opt++) {
-                    const x = boundaries.left + (col * cellWidth) + (opt * optionWidth) + (optionWidth * 0.25);
-                    const y = boundaries.top + (row * cellHeight) + (cellHeight * 0.25);
-                    const w = optionWidth * 0.5;
-                    const h = cellHeight * 0.5;
+                    // Adjust bubble detection area to focus more on the center
+                    const x = boundaries.left + (col * cellWidth) + (opt * optionWidth) + (optionWidth * 0.3);
+                    const y = boundaries.top + (row * cellHeight) + (cellHeight * 0.3);
+                    const w = optionWidth * 0.4; // Smaller detection area
+                    const h = cellHeight * 0.4;  // Smaller detection area
                     
                     const darkness = this.calculateBubbleDarkness(ctx, x, y, w, h);
                     
-                    if (darkness > maxDarkness && darkness > 0.3) { // At least 30% dark
+                    // Lower threshold for detection since we're preprocessing the image
+                    if (darkness > maxDarkness && darkness > 0.15) { // Reduced threshold to 15%
                         maxDarkness = darkness;
                         selectedOption = opt;
                     }
@@ -495,17 +518,30 @@ class OMRScanner {
                                              Math.ceil(width), Math.ceil(height));
             const data = imageData.data;
             let darkPixels = 0;
-            let totalPixels = width * height;
+            let totalPixels = 0;
             
             for (let i = 0; i < data.length; i += 4) {
-                // Using a more sophisticated darkness calculation
-                const intensity = (data[i] * 0.299 + data[i + 1] * 0.587 + data[i + 2] * 0.114);
-                if (intensity < 128) {
+                const r = data[i];
+                const g = data[i + 1];
+                const b = data[i + 2];
+                
+                // Count black pixels (from our preprocessing)
+                if (r < 50 && g < 50 && b < 50) {
                     darkPixels++;
                 }
+                totalPixels++;
             }
             
-            return darkPixels / totalPixels;
+            // Calculate the percentage of dark pixels
+            const darkness = darkPixels / totalPixels;
+            
+            // Debug visualization (comment out in production)
+            if (darkness > 0.1) {
+                ctx.strokeStyle = 'rgba(255, 0, 0, 0.5)';
+                ctx.strokeRect(Math.floor(x), Math.floor(y), Math.ceil(width), Math.ceil(height));
+            }
+            
+            return darkness;
         } catch (e) {
             console.error('Error calculating bubble darkness:', e);
             return 0;
