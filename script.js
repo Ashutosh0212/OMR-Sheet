@@ -9,11 +9,21 @@ class OMRScanner {
         this.answerForm = document.getElementById('answer-form');
         this.resultsDiv = document.getElementById('results');
         
-        // Configuration
+        // Configuration specific to the OMR sheet format
         this.numQuestions = 100;
         this.optionsPerQuestion = 4;
         this.availableOptions = ['A', 'B', 'C', 'D'];
         
+        // Grid configuration for the specific format
+        this.gridConfig = {
+            rows: 25,          // 25 questions per column
+            cols: 4,           // 4 columns
+            optionsPerQ: 4,    // A, B, C, D
+            bubbleRadius: 12,  // Approximate radius of bubbles
+            gridMarginTop: 0.2,  // 20% margin from top
+            gridMarginLeft: 0.1  // 10% margin from left
+        };
+
         // Check if we're on HTTPS
         if (window.location.protocol === 'http:' && !window.location.hostname.includes('localhost')) {
             this.displaySecureContextError();
@@ -335,11 +345,14 @@ class OMRScanner {
         
         console.log('Starting OMR processing...');
         
-        // Enhanced image processing
-        const processedImageData = this.enhanceImage(canvas);
+        // Pre-process image
+        const processedImageData = this.preprocessImage(canvas);
         
-        // Find bubbles using contour detection
-        const bubbles = this.detectBubbles(processedImageData);
+        // Detect grid and align
+        const gridInfo = this.detectGrid(processedImageData);
+        
+        // Find and analyze bubbles
+        const bubbles = this.detectBubbles(processedImageData, gridInfo);
         
         if (!bubbles || bubbles.length === 0) {
             throw new Error('No bubbles detected in the image');
@@ -348,51 +361,45 @@ class OMRScanner {
         // Analyze bubbles
         const answers = this.analyzeBubbles(bubbles);
         
-        if (!answers || answers.length === 0) {
-            throw new Error('No answers could be determined');
-        }
-        
         // Display results
         this.displayResults({
-            score: 0,
             total: this.numQuestions,
             details: answers.map((ans, i) => ({
                 question: i + 1,
-                given: ans || '-',
-                correct: '-',
-                isCorrect: false
+                given: ans || '-'
             }))
         });
     }
 
-    enhanceImage(canvas) {
+    preprocessImage(canvas) {
         const ctx = canvas.getContext('2d');
-        const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+        let imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
         const data = imageData.data;
         
         // Convert to grayscale and enhance contrast
         for (let i = 0; i < data.length; i += 4) {
-            const r = data[i];
-            const g = data[i + 1];
-            const b = data[i + 2];
+            // Convert to grayscale with optimized weights for blue/black ink
+            const gray = Math.round(
+                0.299 * data[i] +     // Red
+                0.587 * data[i + 1] + // Green
+                0.114 * data[i + 2]   // Blue
+            );
             
-            // Convert to grayscale using luminance formula
-            let gray = 0.299 * r + 0.587 * g + 0.114 * b;
+            // Enhance contrast for better bubble detection
+            let enhanced = gray;
+            if (gray < 128) {
+                enhanced = gray * 0.8; // Darken dark pixels
+            } else {
+                enhanced = Math.min(255, gray * 1.2); // Lighten light pixels
+            }
             
-            // Apply adaptive thresholding
-            const x = (i/4) % canvas.width;
-            const y = Math.floor((i/4) / canvas.width);
-            const threshold = this.calculateAdaptiveThreshold(data, canvas.width, x, y);
-            
-            // Apply the threshold
-            const value = gray < threshold ? 0 : 255;
-            
-            data[i] = value;
-            data[i + 1] = value;
-            data[i + 2] = value;
+            data[i] = enhanced;
+            data[i + 1] = enhanced;
+            data[i + 2] = enhanced;
         }
         
-        ctx.putImageData(imageData, 0, 0);
+        // Apply local adaptive thresholding
+        imageData = this.applyAdaptiveThreshold(imageData);
         
         if (this.debug) {
             this.debugCanvas.getContext('2d').putImageData(imageData, 0, 0);
@@ -401,55 +408,86 @@ class OMRScanner {
         return imageData;
     }
 
-    calculateAdaptiveThreshold(data, width, x, y, windowSize = 15) {
-        let sum = 0;
-        let count = 0;
+    applyAdaptiveThreshold(imageData) {
+        const width = imageData.width;
+        const height = imageData.height;
+        const data = imageData.data;
+        const windowSize = 15;
+        const C = 5; // Threshold adjustment
         
-        for (let dy = -windowSize; dy <= windowSize; dy++) {
-            for (let dx = -windowSize; dx <= windowSize; dx++) {
-                const nx = x + dx;
-                const ny = y + dy;
+        for (let y = 0; y < height; y++) {
+            for (let x = 0; x < width; x++) {
+                const i = (y * width + x) * 4;
                 
-                if (nx >= 0 && nx < width && ny >= 0 && ny < data.length/(4*width)) {
-                    const i = (ny * width + nx) * 4;
-                    sum += data[i];
-                    count++;
+                // Calculate local mean
+                let sum = 0;
+                let count = 0;
+                
+                for (let wy = -windowSize; wy <= windowSize; wy++) {
+                    for (let wx = -windowSize; wx <= windowSize; wx++) {
+                        const ny = y + wy;
+                        const nx = x + wx;
+                        
+                        if (ny >= 0 && ny < height && nx >= 0 && nx < width) {
+                            sum += data[(ny * width + nx) * 4];
+                            count++;
+                        }
+                    }
                 }
+                
+                const mean = sum / count;
+                const threshold = mean - C;
+                
+                // Apply threshold
+                const value = data[i] < threshold ? 0 : 255;
+                data[i] = value;
+                data[i + 1] = value;
+                data[i + 2] = value;
             }
         }
         
-        return (sum / count) * 0.95; // 95% of local average as threshold
+        return imageData;
     }
 
-    detectBubbles(imageData) {
-        const bubbles = [];
-        const data = imageData.data;
+    detectGrid(imageData) {
         const width = imageData.width;
         const height = imageData.height;
         
-        // Define the expected grid structure
-        const ROWS = 25;
-        const COLS = 4;
-        const OPTIONS = 4;
+        // Calculate grid dimensions based on the image size
+        return {
+            cellWidth: width / (this.gridConfig.cols + 2), // Add margin
+            cellHeight: height / (this.gridConfig.rows + 2), // Add margin
+            startX: width * this.gridConfig.gridMarginLeft,
+            startY: height * this.gridConfig.gridMarginTop
+        };
+    }
+
+    detectBubbles(imageData, gridInfo) {
+        const bubbles = [];
+        const data = imageData.data;
+        const { cellWidth, cellHeight, startX, startY } = gridInfo;
         
-        // Calculate cell dimensions
-        const cellWidth = width / COLS;
-        const cellHeight = height / ROWS;
-        const optionWidth = cellWidth / OPTIONS;
+        // Size of the bubble detection area
+        const bubbleWidth = cellWidth * 0.2;  // 20% of cell width
+        const bubbleHeight = cellHeight * 0.2; // 20% of cell height
         
-        // Scan each cell for bubbles
-        for (let row = 0; row < ROWS; row++) {
-            for (let col = 0; col < COLS; col++) {
+        for (let row = 0; row < this.gridConfig.rows; row++) {
+            for (let col = 0; col < this.gridConfig.cols; col++) {
                 const bubbleGroup = [];
                 
-                for (let opt = 0; opt < OPTIONS; opt++) {
-                    const x = Math.floor(col * cellWidth + opt * optionWidth + optionWidth * 0.25);
-                    const y = Math.floor(row * cellHeight + cellHeight * 0.25);
-                    const w = Math.floor(optionWidth * 0.5);
-                    const h = Math.floor(cellHeight * 0.5);
+                for (let opt = 0; opt < this.gridConfig.optionsPerQ; opt++) {
+                    // Calculate bubble center position
+                    const x = Math.floor(startX + col * cellWidth + (opt + 0.5) * (cellWidth / this.gridConfig.optionsPerQ));
+                    const y = Math.floor(startY + row * cellHeight + cellHeight * 0.5);
                     
-                    const darkness = this.calculateRegionDarkness(
-                        data, width, x, y, w, h
+                    // Calculate darkness in the bubble area
+                    const darkness = this.calculateBubbleDarkness(
+                        data,
+                        imageData.width,
+                        x - bubbleWidth/2,
+                        y - bubbleHeight/2,
+                        bubbleWidth,
+                        bubbleHeight
                     );
                     
                     bubbleGroup.push({
@@ -457,22 +495,31 @@ class OMRScanner {
                         col,
                         option: opt,
                         darkness,
-                        x, y, w, h
+                        x, y,
+                        width: bubbleWidth,
+                        height: bubbleHeight
                     });
                     
+                    // Draw debug rectangle
                     if (this.debug) {
                         const ctx = this.debugCanvas.getContext('2d');
                         ctx.strokeStyle = `rgba(255, 0, 0, ${darkness})`;
-                        ctx.strokeRect(x, y, w, h);
+                        ctx.strokeRect(
+                            x - bubbleWidth/2,
+                            y - bubbleHeight/2,
+                            bubbleWidth,
+                            bubbleHeight
+                        );
                     }
                 }
                 
-                // Only add the darkest bubble if it meets the threshold
+                // Find the darkest bubble in the group
                 const darkest = bubbleGroup.reduce((prev, curr) => 
                     curr.darkness > prev.darkness ? curr : prev
                 );
                 
-                if (darkest.darkness > 0.3) { // Minimum darkness threshold
+                // Only consider it marked if darkness is above threshold
+                if (darkest.darkness > 0.25) { // Lowered threshold for better detection
                     bubbles.push(darkest);
                 }
             }
@@ -481,9 +528,15 @@ class OMRScanner {
         return bubbles;
     }
 
-    calculateRegionDarkness(data, width, x, y, w, h) {
+    calculateBubbleDarkness(data, width, x, y, w, h) {
         let darkPixels = 0;
         let totalPixels = 0;
+        
+        // Convert coordinates to integers
+        x = Math.floor(x);
+        y = Math.floor(y);
+        w = Math.floor(w);
+        h = Math.floor(h);
         
         for (let dy = 0; dy < h; dy++) {
             for (let dx = 0; dx < w; dx++) {
@@ -492,7 +545,8 @@ class OMRScanner {
                 
                 if (px >= 0 && px < width && py >= 0 && py < data.length/(4*width)) {
                     const i = (py * width + px) * 4;
-                    if (data[i] < 128) { // Dark pixel
+                    // Consider darker pixels (adjusted threshold)
+                    if (data[i] < 180) {
                         darkPixels++;
                     }
                     totalPixels++;
@@ -506,28 +560,11 @@ class OMRScanner {
     analyzeBubbles(bubbles) {
         const answers = new Array(this.numQuestions).fill(null);
         
-        // Group bubbles by question (row and column)
-        const questionGroups = new Map();
-        
+        // Group bubbles by question
         bubbles.forEach(bubble => {
-            const questionIndex = bubble.row + bubble.col * 25;
-            if (!questionGroups.has(questionIndex)) {
-                questionGroups.set(questionIndex, []);
-            }
-            questionGroups.get(questionIndex).push(bubble);
-        });
-        
-        // Find darkest bubble in each group
-        questionGroups.forEach((group, questionIndex) => {
-            if (group.length > 0) {
-                const darkest = group.reduce((prev, curr) => 
-                    curr.darkness > prev.darkness ? curr : prev
-                );
-                
-                // Only mark as answered if darkness meets minimum threshold
-                if (darkest.darkness > 0.3) {
-                    answers[questionIndex] = this.availableOptions[darkest.option];
-                }
+            const questionIndex = bubble.row + bubble.col * this.gridConfig.rows;
+            if (questionIndex < this.numQuestions) {
+                answers[questionIndex] = this.availableOptions[bubble.option];
             }
         });
         
