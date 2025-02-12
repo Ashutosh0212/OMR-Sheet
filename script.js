@@ -314,7 +314,7 @@ class OMRScanner {
         }
 
         // Apply preprocessing to enhance pen marks
-        this.enhanceImage(canvas);
+        const pinkPixels = this.enhanceImage(canvas);
         
         // Find the grid boundaries using edge detection
         const boundaries = this.findGridBoundaries(canvas);
@@ -359,25 +359,28 @@ class OMRScanner {
         const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
         const data = imageData.data;
         
-        // First pass: Detect blue and black pen marks
+        // First pass: Detect pink grid lines
+        const pinkPixels = [];
         for (let i = 0; i < data.length; i += 4) {
             const r = data[i];
             const g = data[i + 1];
             const b = data[i + 2];
             
-            // Check for blue pen (high blue, lower red and green)
-            const isBlue = (b > 150 && r < 150 && g < 150) || 
-                          (b - r > 50 && b - g > 50);
+            // Detect pink grid lines (will be used for alignment)
+            const isPink = (r > 200 && g < 150 && b > 150);
+            if (isPink) {
+                pinkPixels.push(Math.floor(i / 4));
+            }
             
-            // Check for black pen (all channels low)
-            const isBlack = (r < 100 && g < 100 && b < 100);
+            // Check for filled bubbles (dark blue or black)
+            const isDark = (r < 100 && g < 100 && b < 100) || // Black
+                          (r < 100 && g < 100 && b > 150);    // Dark blue
             
-            // Convert detected marks to pure black
-            if (isBlue || isBlack) {
+            if (isDark) {
                 data[i] = 0;     // R
                 data[i + 1] = 0; // G
                 data[i + 2] = 0; // B
-            } else {
+            } else if (!isPink) {
                 // Make non-marks white for better contrast
                 data[i] = 255;
                 data[i + 1] = 255;
@@ -386,6 +389,7 @@ class OMRScanner {
         }
         
         ctx.putImageData(imageData, 0, 0);
+        return pinkPixels;
     }
 
     findGridBoundaries(canvas) {
@@ -393,117 +397,84 @@ class OMRScanner {
         const width = canvas.width;
         const height = canvas.height;
         
-        // Create horizontal and vertical projections
-        const horizontalProjection = new Array(height).fill(0);
-        const verticalProjection = new Array(width).fill(0);
+        // Find pink grid lines first
+        const pinkPixels = this.enhanceImage(canvas);
         
-        const imageData = ctx.getImageData(0, 0, width, height);
-        const data = imageData.data;
+        // Calculate pink pixel density in regions
+        let leftMost = width;
+        let rightMost = 0;
+        let topMost = height;
+        let bottomMost = 0;
         
-        // Calculate projections
-        for (let y = 0; y < height; y++) {
-            for (let x = 0; x < width; x++) {
-                const i = (y * width + x) * 4;
-                const intensity = data[i]; // Using red channel (grayscale)
-                if (intensity < 128) { // Dark pixel
-                    horizontalProjection[y]++;
-                    verticalProjection[x]++;
-                }
-            }
-        }
+        pinkPixels.forEach(pixel => {
+            const x = pixel % width;
+            const y = Math.floor(pixel / width);
+            
+            leftMost = Math.min(leftMost, x);
+            rightMost = Math.max(rightMost, x);
+            topMost = Math.min(topMost, y);
+            bottomMost = Math.max(bottomMost, y);
+        });
         
-        // Find grid boundaries using peaks in projections
-        const boundaries = {
-            top: 0,
-            bottom: height - 1,
-            left: 0,
-            right: width - 1
+        // Add margins to boundaries
+        return {
+            left: leftMost + 5,
+            right: rightMost - 5,
+            top: topMost + 5,
+            bottom: bottomMost - 5
         };
-        
-        // Find top boundary
-        for (let y = 0; y < height; y++) {
-            if (horizontalProjection[y] > width * 0.3) { // At least 30% of width is dark
-                boundaries.top = y;
-                break;
-            }
-        }
-        
-        // Find bottom boundary
-        for (let y = height - 1; y >= 0; y--) {
-            if (horizontalProjection[y] > width * 0.3) {
-                boundaries.bottom = y;
-                break;
-            }
-        }
-        
-        // Find left boundary
-        for (let x = 0; x < width; x++) {
-            if (verticalProjection[x] > height * 0.3) {
-                boundaries.left = x;
-                break;
-            }
-        }
-        
-        // Find right boundary
-        for (let x = width - 1; x >= 0; x--) {
-            if (verticalProjection[x] > height * 0.3) {
-                boundaries.right = x;
-                break;
-            }
-        }
-        
-        // Validate boundaries
-        if (boundaries.right - boundaries.left < width * 0.3 || 
-            boundaries.bottom - boundaries.top < height * 0.3) {
-            return null;
-        }
-        
-        return boundaries;
     }
 
     analyzeBubblesNew(canvas, boundaries) {
         const ctx = canvas.getContext('2d');
         const answers = new Array(100).fill(null);
         
-        // Calculate grid dimensions
+        // Calculate grid dimensions based on the OMR format in the image
         const gridWidth = boundaries.right - boundaries.left;
         const gridHeight = boundaries.bottom - boundaries.top;
         
-        // Define the expected grid structure
-        const COLUMNS = 4;  // 4 columns of questions
-        const ROWS = 25;    // 25 questions per column
-        const OPTIONS = 4;  // 4 options per question (A,B,C,D)
+        // The OMR has 4 sections of 25 questions each
+        const SECTIONS = 4;
+        const QUESTIONS_PER_SECTION = 25;
+        const OPTIONS = 4; // A, B, C, D
         
-        // Calculate cell dimensions
-        const cellWidth = gridWidth / COLUMNS;
-        const cellHeight = gridHeight / ROWS;
-        const optionWidth = cellWidth / OPTIONS;
+        // Calculate dimensions for each section
+        const sectionHeight = gridHeight / SECTIONS;
+        const questionHeight = sectionHeight / QUESTIONS_PER_SECTION;
         
-        // Analyze each question
-        for (let col = 0; col < COLUMNS; col++) {
-            for (let row = 0; row < ROWS; row++) {
+        // Process each section
+        for (let section = 0; section < SECTIONS; section++) {
+            const sectionY = boundaries.top + (section * sectionHeight);
+            
+            // Process each question in the section
+            for (let q = 0; q < QUESTIONS_PER_SECTION; q++) {
+                const questionY = sectionY + (q * questionHeight);
                 let maxDarkness = 0;
                 let selectedOption = null;
                 
-                // Check each option (A,B,C,D)
+                // Check each option (A, B, C, D)
                 for (let opt = 0; opt < OPTIONS; opt++) {
-                    // Adjust bubble detection area to focus more on the center
-                    const x = boundaries.left + (col * cellWidth) + (opt * optionWidth) + (optionWidth * 0.3);
-                    const y = boundaries.top + (row * cellHeight) + (cellHeight * 0.3);
-                    const w = optionWidth * 0.4; // Smaller detection area
-                    const h = cellHeight * 0.4;  // Smaller detection area
+                    // Calculate bubble position
+                    // Adjust these values based on the exact layout in your image
+                    const bubbleX = boundaries.left + (opt * (gridWidth / 5.5));
+                    const bubbleY = questionY + (questionHeight * 0.2);
+                    const bubbleWidth = gridWidth / 20;  // Adjust based on actual bubble size
+                    const bubbleHeight = questionHeight * 0.6;
                     
-                    const darkness = this.calculateBubbleDarkness(ctx, x, y, w, h);
+                    const darkness = this.calculateBubbleDarkness(ctx, bubbleX, bubbleY, bubbleWidth, bubbleHeight);
                     
-                    // Lower threshold for detection since we're preprocessing the image
-                    if (darkness > maxDarkness && darkness > 0.15) { // Reduced threshold to 15%
+                    // Debug visualization
+                    ctx.strokeStyle = 'rgba(255, 0, 0, 0.5)';
+                    ctx.strokeRect(bubbleX, bubbleY, bubbleWidth, bubbleHeight);
+                    
+                    if (darkness > maxDarkness && darkness > 0.2) { // Adjusted threshold
                         maxDarkness = darkness;
                         selectedOption = opt;
                     }
                 }
                 
                 if (selectedOption !== null) {
-                    const questionNum = row + (col * ROWS);
+                    const questionNum = q + (section * QUESTIONS_PER_SECTION);
                     answers[questionNum] = ['A', 'B', 'C', 'D'][selectedOption];
                 }
             }
@@ -525,23 +496,15 @@ class OMRScanner {
                 const g = data[i + 1];
                 const b = data[i + 2];
                 
-                // Count black pixels (from our preprocessing)
-                if (r < 50 && g < 50 && b < 50) {
+                // Count dark pixels (black or dark blue)
+                if ((r < 100 && g < 100 && b < 100) ||    // Black
+                    (r < 100 && g < 100 && b > 150)) {    // Dark blue
                     darkPixels++;
                 }
                 totalPixels++;
             }
             
-            // Calculate the percentage of dark pixels
-            const darkness = darkPixels / totalPixels;
-            
-            // Debug visualization (comment out in production)
-            if (darkness > 0.1) {
-                ctx.strokeStyle = 'rgba(255, 0, 0, 0.5)';
-                ctx.strokeRect(Math.floor(x), Math.floor(y), Math.ceil(width), Math.ceil(height));
-            }
-            
-            return darkness;
+            return darkPixels / totalPixels;
         } catch (e) {
             console.error('Error calculating bubble darkness:', e);
             return 0;
